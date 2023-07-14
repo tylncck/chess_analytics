@@ -1,0 +1,1378 @@
+---
+title: "DATA 606 - Final Project (Group 5)"
+output: html_notebook
+---
+
+# Package Loading
+
+```{r message=FALSE, warning=FALSE}
+rm(list = ls())
+if (!require(pacman)) install.packages('pacman')
+p_load(dplyr, caret, ggplot2, ISLR, stringr, tree, MASS, Information, boot,
+       tidyverse, rpart, rpart.plot, ROCR, broom, GGally, heplots, tseries, VGAM)
+```
+
+# Data Import and Wrangling
+
+## Data Import
+
+```{r}
+chess_df = read.csv('games.csv')
+```
+
+## Data Wrangling
+
+### Duplicate Removal
+
+Removal of duplicates based on player matches to avoid duplication.
+
+```{r}
+chess_df$combined = paste(chess_df$white_id, '-', chess_df$black_id, sep = '')
+chess_df = chess_df[!duplicated(chess_df$combined), ]
+```
+
+### Creating New Features
+
+```{r}
+chess_df$victory_status = toupper(chess_df$victory_status)
+chess_df$winner = toupper(chess_df$winner)
+chess_df$rated = toupper(chess_df$rated)
+chess_df$opening_name = toupper(chess_df$opening_name)
+
+chess_df[c('IC1', 'IC2')] <- str_split_fixed(chess_df$increment_code, '[+]', 2)
+chess_df$IC1 = as.numeric(chess_df$IC1)
+
+chess_df = chess_df %>% 
+  mutate(pace_type = if_else(IC1 < 3, 'BULLET', 
+                             if_else(IC1 < 15, 'BLITZ', 'STANDARD')))
+
+a = c('W1','B1','W2','B2','W3','B3','W4','B4','W5','B5', 'Rest')
+chess_df[a] = str_split_fixed(chess_df$moves, ' ', 11)
+
+chess_df$W_First5 = paste(chess_df$W1, chess_df$W2, chess_df$W3, chess_df$W4,
+                          chess_df$W5, sep = '_')
+chess_df$B_First5 = paste(chess_df$B1, chess_df$B2, chess_df$B3, chess_df$B4,
+                          chess_df$B5, sep = '_')
+
+chess_df$Rating_WB = chess_df$white_rating/chess_df$black_rating
+
+chess_df = chess_df %>% 
+  mutate(rating_bins = ifelse(Rating_WB<=0.9, 
+                              "Black Favoured", 
+                              ifelse(Rating_WB>=1.1, 
+                                     "White Favoured", 
+                                     "Equal")))
+
+chess_df = chess_df %>% dplyr::select(-c('id', 'white_id', 'black_id','opening_eco',
+                                  'opening_ply', 'combined', 'created_at',
+                                  'last_move_at', 'created_at', 'last_move_at',
+                                  'increment_code', 'IC1', 'IC2', 'W2','B2','W3',
+                                  'B3','W4','B4','W5','B5', 'Rest', 'moves',
+                                  'white_rating', 'black_rating'))
+
+chess_df = chess_df %>% 
+  mutate(opening_strategy = if_else(grepl('DEFENSE', 
+                                          chess_df$opening_name, 
+                                          fixed = TRUE) == TRUE, 
+                                    'DEFENSE', 
+                                    'NO_DEFENSE'))
+
+
+a = c('P1', 'P2', 'P3')
+chess_df[a] = str_split_fixed(chess_df$opening_name, ':', 3)
+chess_df = chess_df %>% dplyr::select(-c('P2', 'P3'))
+
+a = c('P11', 'P12', 'P13')
+chess_df[a] = str_split_fixed(chess_df$P1, ' #', 3)
+chess_df = chess_df %>% dplyr::select(-c('P1', 'P12', 'P13'))
+
+a = c('P21', 'P22')
+chess_df[a] = str_split_fixed(chess_df$P11, '[|]', 2)
+chess_df = chess_df %>% dplyr::select(-c('P11', 'P22'))
+
+chess_df = chess_df %>% 
+  group_by(P21) %>% 
+  mutate(count=n()) %>%
+  mutate(op_name = if_else(count < 50, 'OTHER', P21)) %>% 
+  ungroup()
+
+chess_df = chess_df %>% dplyr::select(-c('P21', 'count', 'opening_name'))
+```
+
+### Data Wrangling for Question 1
+
+```{r}
+chess_df_q1 = chess_df %>% filter(winner != 'DRAW')
+```
+
+### Weight of Evidence Calculations
+
+```{r}
+chess_df_q1 =  as.data.frame(unclass(chess_df_q1), stringsAsFactors = TRUE)
+
+chess_df_q1 = chess_df_q1 %>% 
+  mutate(target_y = if_else(winner == 'BLACK', 0, 1))
+IV = create_infotables(data=chess_df_q1, y='target_y')
+
+WOE_List = c('op_name', 'W1', 'B1')
+for (i in 1:length(WOE_List)){
+  assign(paste0('WOE_Temp'), 
+         eval(parse(text = paste0('IV$Tables$',WOE_List[i]))))
+  WOE_Temp = WOE_Temp %>% dplyr::select(-c('N', 'Percent', 'IV'))
+  names(WOE_Temp)[2] = paste('WOE_', WOE_List[i], sep = '')
+  chess_df_q1 = merge(chess_df_q1,WOE_Temp,by=WOE_List[i], all.x = TRUE)
+}
+
+chess_df_q3 = chess_df_q1 %>% dplyr::select(c('winner', 'W1', 'WOE_W1'))
+chess_df_q3 =  as.data.frame(unclass(chess_df_q3), stringsAsFactors = TRUE)
+
+chess_df_q1 = chess_df_q1 %>% dplyr::select(-c('victory_status', 'target_y',
+                                               'op_name', 'W1', 'B1',
+                                               'W_First5', 'B_First5'))
+chess_df_q1 =  as.data.frame(unclass(chess_df_q1), stringsAsFactors = TRUE)
+
+chess_df_q2 = chess_df %>% dplyr::select(-c('winner', 'op_name'))
+chess_df_q2 =  as.data.frame(unclass(chess_df_q2), stringsAsFactors = TRUE)
+```
+
+### CSV file for Question 1
+
+```{r}
+write.csv(chess_df_q1, 'Chess_data_q1.csv')
+```
+
+### CSV file for Question 2
+
+```{r}
+write.csv(chess_df_q2, 'chess_df_overall.csv')
+```
+
+### CSV file for Question 3
+
+```{r}
+write.csv(chess_df_q1, 'Chess_data_q1.csv')
+```
+
+# Exploratory Data Analysis
+
+## Univariate Analysis
+
+```{r}
+summary(chess_df_q1)
+summary(chess_df_q2)
+```
+
+```{r}
+hist(chess_df_q1$turns,
+     col = 'darkred',
+     main = 'Histogram of Turns Variable',
+     xlab = 'Turns')
+```
+
+```{r}
+hist(chess_df_q1$Rating_WB,
+     col = 'darkred',
+     main = 'Histogram of Rating_WB Variable',
+     xlab = 'Rating_WB')
+```
+## Bivariate Analysis
+
+```{r}
+plot(chess_df_q1,
+     main = 'Chess Data Pair Plot')
+```
+
+```{r warning=FALSE, message=FALSE}
+chess_df_q1 %>%
+  dplyr::select(Rating_WB,winner) %>%
+  boxplot(Rating_WB ~ winner,
+          data = .,
+          horizontal = T, #horizontal plot
+          notch = T, # CI for median
+          main = "Boxplot of Rating Ratio (W/B) by Winner",
+          sub = "White Rating / Black Rating",
+          xlab = "Rating Ratio",
+          ylab = 'Winner',
+          col = "darkred"
+  )
+```
+
+```{r warning=FALSE, message=FALSE}
+chess_df_q1 %>%
+  dplyr::select(turns, winner) %>%
+  boxplot(turns ~ winner,
+          data = .,
+          horizontal = T, #horizontal plot
+          notch = T, # CI for median
+          main = "Boxplot of Turns by Winner",
+          sub = "Number of turns played in a chess game",
+          xlab = "Turns",
+          ylab = 'Winner',
+          col = "darkred"
+  )
+```
+
+```{r warning=FALSE, message=FALSE}
+chess_df_q1 %>%
+  dplyr::select(WOE_op_name, winner) %>%
+  plot(WOE_op_name ~ winner,
+          data = .,
+          horizontal = T, #horizontal plot
+          notch = T, # CI for median
+          main = "Boxplot of WOE Opening Name by Winner",
+          sub = "Weight of Evidence Calculated by Opening Name",
+          xlab = "Winner",
+          ylab = 'WOE Opening Name',
+          col = "darkred"
+  )
+```
+
+```{r warning=FALSE, message=FALSE}
+chess_df_q2 %>%
+  dplyr::select(turns, victory_status) %>%
+  plot(turns ~ victory_status,
+          data = .,
+          horizontal = T, #horizontal plot
+          notch = T, # CI for median
+          main = "Boxplot of Turns by Victory Status",
+          sub = "Victory Status = How Game Ended",
+          xlab = "Victory Status",
+          ylab = 'Turns',
+          col = "darkred"
+  )
+```
+
+```{r warning=FALSE, message=FALSE}
+chess_df_q2 %>%
+  dplyr::select(Rating_WB, victory_status) %>%
+  plot(Rating_WB ~ victory_status,
+          data = .,
+          horizontal = T, #horizontal plot
+          notch = T, # CI for median
+          main = "Boxplot of Rating Ratio by Victory Status",
+          sub = "Victory Status = How Game Ended, Rating Ratio = White Rating / Black Rating",
+          xlab = "Victory Status",
+          ylab = 'Rating Ratio',
+          col = "darkred"
+  )
+```
+# Question 1
+
+## Stratified Train - Test Split
+
+```{r}
+set.seed(5)
+idx = createDataPartition(chess_df_q1$rating_bins, p = .75, list = FALSE)
+train_q1 <- chess_df_q1[ idx,]
+test_q1  <- chess_df_q1[-idx,]
+
+rownames(train_q1) = 1:nrow(train_q1)
+rownames(test_q1) = 1:nrow(test_q1)
+```
+
+## Decision Tree
+
+### Additional Data Processing
+
+Not required
+
+### Model Assumptions
+
+No Assumptions
+
+### Model Train with k-fold Cross Validation
+
+#### Model Train
+
+```{r}
+fit_formula = winner ~ rated + turns + pace_type + WOE_W1 + WOE_B1 +
+  opening_strategy + WOE_op_name + rating_bins
+
+tree_q1 = rpart(fit_formula, data = train_q1, method="class")
+```
+
+```{r}
+rpart.plot(tree_q1, 
+           type = 2, 
+           extra =1, 
+           under = TRUE, 
+           branch.lty=3, digits = 4)
+```
+
+#### Cross Validation Error
+
+```{r}
+set.seed(5)
+folds = createFolds(train_q1$winner, k=10)
+
+misclassification<-function(idx){
+  temp_train = train_q1[-idx,]
+  temp_test = train_q1[idx,]
+  tree_model = rpart(fit_formula, data = temp_train, method="class")
+  pred = predict(tree_model,temp_test, type="class")
+  actual = temp_test$winner
+  conf = table(pred, actual)
+  1 - sum(diag(conf)) / sum(conf)
+}
+CV_Tree_Q1 = mean(as.numeric(lapply(folds, misclassification)))
+CV_Tree_Q1
+```
+
+### Model Performance on Test Dataset
+
+```{r}
+q1_tree_pred = predict(tree_q1, test_q1, type = 'class')
+actual_q1 = test_q1$winner
+table = table(q1_tree_pred, actual_q1)
+ggplot(as.data.frame(table), aes(x = actual_q1, y = q1_tree_pred)) +
+  geom_tile(aes(fill = Freq), colour = "white") +
+  scale_fill_gradient(low = "lightblue", high = "steelblue") +
+  geom_text(aes(label = Freq), color = "white", size = 6) +
+  xlab("True Winner") +
+  ylab("Predicted Winner") +
+  ggtitle("Confusion Matrix for RPART Classification Tree (Test Data)")
+```
+
+```{r}
+Accuracy_Tree_Q1 = sum(diag(table)) / sum(table)
+paste('The Accuracy value of RPART Tree is:', Accuracy_Tree_Q1, sep = ' ')
+```
+
+#### Performance Metrics
+
+```{r}
+confusionMatrix(table, positive = 'WHITE')
+```
+
+#### ROC Curve and AUC Calculations
+
+```{r}
+tree_prob_pred = prediction(predict(tree_q1, test_q1, type = 'prob')[, 2],
+                            test_q1$winner)
+
+plot(performance(tree_prob_pred, "tpr", "fpr"),
+     main = 'ROC Curve of RPART Tree',
+     col = 'darkred')
+abline(0, 1, lty = 2)
+plot(performance(tree_prob_pred, "acc"),
+     main = 'Accuracy vs. Classification Cutoff',
+     col = 'darkred')
+```
+
+```{r}
+auc_tree = performance(tree_prob_pred, measure = "auc")
+paste('The AUC value of RPART Tree is:', auc_tree@y.values[[1]], sep = ' ')
+```
+
+## Logistic Regression
+
+### Additional Data Processing
+
+Not required
+
+### Model Train
+
+#### Full Model
+
+```{r}
+fit_formula_q1_log = winner ~ rated + turns + pace_type + WOE_W1 + WOE_B1 + 
+  Rating_WB + opening_strategy + WOE_op_name
+
+log_reg_full = glm(fit_formula_q1_log, data=train_q1, family=binomial)
+summary(log_reg_full)
+```
+
+#### Reduced Model
+
+```{r}
+fit_formula_q1_log = winner ~ turns + WOE_B1 + Rating_WB + WOE_op_name
+
+log_reg_reduced = glm(fit_formula_q1_log, data=train_q1, family=binomial)
+summary(log_reg_reduced)
+```
+
+```{r}
+fit_formula_q1_log = winner ~ turns + Rating_WB + WOE_op_name
+
+log_reg_reduced = glm(fit_formula_q1_log, data=train_q1, family=binomial)
+summary(log_reg_reduced)
+```
+
+### Model Assumptions
+
+#### Independence
+
+```{r warning=FALSE, message=FALSE}
+my_data = train_q1 %>% dplyr::select(c(turns, Rating_WB))
+ggpairs(my_data)
+```
+
+#### Linearity
+
+```{r}
+pred_prob = predict(log_reg_reduced, type = "response")
+
+my_data = train_q1 %>% dplyr::select(c(Rating_WB, turns))
+predictors = colnames(my_data)
+
+my_data <- my_data %>%
+  mutate(logit = log(pred_prob/(1-pred_prob))) %>%
+  gather(key = "predictors", value = "predictor.value", -logit)
+
+ggplot(my_data, aes(logit, predictor.value))+
+  geom_point(size = 0.5, alpha = 0.5) +
+  geom_smooth(method = "loess") + 
+  theme_bw() + 
+  facet_wrap(~predictors, scales = "free_y")
+```
+
+#### Outlier Detection
+
+```{r}
+plot(log_reg_reduced, which = 4, id.n = 3)
+```
+
+```{r}
+model_data <- augment(log_reg_reduced) %>% 
+  mutate(index = 1:n())
+
+outlier_rows = model_data %>% 
+  top_n(3, .cooksd) %>%
+  dplyr::select(index) %>% 
+  unlist() %>% as.integer()
+
+ggplot(model_data, aes(index, .std.resid)) + 
+  geom_point(aes(color = winner), alpha = .5) +
+  theme_bw()
+```
+
+#### Multicollinearity
+
+```{r}
+car::vif(log_reg_reduced)
+```
+
+### Model Re-Train and k-fold Cross Validation
+
+#### Re-Train
+
+```{r}
+train_q1_cleaned = train_q1[-outlier_rows,]
+```
+
+```{r}
+fit_formula_q1_log = winner ~ Rating_WB + WOE_op_name
+
+log_reg_final = glm(fit_formula_q1_log, data=train_q1_cleaned, family=binomial)
+summary(log_reg_final)
+```
+
+#### Cross Validation To Determine Best Cut-Off
+
+```{r}
+set.seed(5)
+folds_class = createFolds(train_q1_cleaned$winner, k=10)
+
+CV_Error = rep(0,99)
+
+log_reg_treshold = seq(0.01, 0.99, 0.01)
+
+for (i in 1:99){
+  p_tresh = log_reg_treshold[i]
+  err = rep(0,10)
+  for (j in 1:10){
+    assign(paste0('temp_train'), train_q1_cleaned[-eval(parse(text = paste0('folds_class$Fold0',1))),])
+    assign(paste0('temp_validation'), train_q1_cleaned[eval(parse(text = paste0('folds_class$Fold0',1))),])
+    temp_log_reg = glm(fit_formula_q1_log, data = temp_train, family = 'binomial')
+    temp_probs = predict(temp_log_reg, temp_validation, type="response")
+    actual = temp_validation$winner
+    predicted = rep('BLACK', nrow(temp_validation))
+    predicted[temp_probs >= p_tresh] = 'WHITE'
+    err[j] = 1-mean(predicted==actual)
+  }
+  CV_Error[i] = mean(err)
+}
+
+CV_Result = data.frame(Probabiliy_Tresholds = log_reg_treshold, CV_Error)
+
+ggplot()+
+  geom_line(data = CV_Result, aes(Probabiliy_Tresholds, CV_Error), colour='darkred')
+
+CV_Result %>% filter(CV_Error == min(CV_Error))
+
+CV_Error_LogReg = CV_Result %>% 
+  filter(CV_Error == min(CV_Error)) %>%
+  dplyr::select(CV_Error) %>%
+  as.double()
+```
+
+### Model Performance on Test Dataset
+
+```{r}
+cut_off = 0.49
+```
+
+```{r}
+pred_prob_logreg = predict(log_reg_final, test_q1, type="response")
+predicted_logreg = rep('BLACK', nrow(test_q1))
+predicted_logreg[pred_prob_logreg >= cut_off] = 'WHITE'
+
+table = table(predicted_logreg, actual_q1)
+ggplot(as.data.frame(table), aes(x = actual_q1, y = predicted_logreg)) +
+  geom_tile(aes(fill = Freq), colour = "white") +
+  scale_fill_gradient(low = "lightblue", high = "steelblue") +
+  geom_text(aes(label = Freq), color = "white", size = 6) +
+  xlab("True Winner") +
+  ylab("Predicted Winner") +
+  ggtitle("Confusion Matrix for Final Logistic Regression Model (Test Data)")
+```
+
+```{r}
+Accuracy_LogReg_Q1 = sum(diag(table)) / sum(table)
+paste('The Accuracy value of LogReg is:', Accuracy_LogReg_Q1, sep = ' ')
+```
+
+#### Performance Metrics
+
+```{r}
+confusionMatrix(table, positive = 'WHITE')
+```
+
+#### ROC Curve and AUC Calculations
+
+```{r}
+plot(performance(prediction(pred_prob_logreg, actual_q1), "tpr", "fpr"),
+     main = 'ROC Curve of Logistic Regression',
+     col = 'darkred')
+abline(0, 1, lty = 2)
+plot(performance(prediction(pred_prob_logreg, actual_q1), "acc"),
+     main = 'Accuracy vs. Classification Cutoff',
+     col = 'darkred')
+```
+
+```{r}
+auc_log_reg = performance(prediction(pred_prob_logreg, actual_q1), "auc")
+paste('The AUC value of RPART Tree is:', auc_log_reg@y.values[[1]], sep = ' ')
+```
+
+## Linear Discriminant Analysis
+
+### Additional Data Processing
+
+Not required
+
+### Model Assumptions
+
+#### Normality with Actual Data
+
+```{r}
+df2.white<-subset(chess_df_q1,winner =="WHITE")
+df2.black<-subset(chess_df_q1,winner =="BLACK")
+```
+
+```{r}
+#Q-Q plot for level "WHITE"
+variable_1<-c("turns","Rating_WB")
+par(mfrow = c(2,1))
+
+for(i in variable_1) {
+  qqnorm(df2.white[[i]]);qqline(df2.white[[i]],col=2)}
+```
+
+```{r}
+par(mfrow = c(2,1))
+for(i in variable_1) {
+  qqnorm(df2.black[[i]]);qqline(df2.black[[i]],col=2)}
+```
+
+```{r}
+jarque.bera.test(df2.white$turns)
+jarque.bera.test(df2.white$Rating_WB)
+```
+
+```{r}
+jarque.bera.test(df2.black$turns)
+jarque.bera.test(df2.black$Rating_WB)
+```
+
+#### Normality with log Transform
+
+```{r}
+
+#Q-Q plot for level "WHITE"
+variable_1<-c("turns","Rating_WB")
+par(mfrow = c(2,1))
+
+for(i in variable_1) {
+  qqnorm(log(df2.white[[i]]));qqline(log(df2.white[[i]]),col=2)}
+```
+
+```{r}
+par(mfrow = c(2,1))
+for(i in variable_1) {
+  qqnorm(log(df2.black[[i]]));qqline(log(df2.black[[i]]),col=2)}
+```
+
+```{r}
+jarque.bera.test(log(df2.white$turns))
+jarque.bera.test(log(df2.white$Rating_WB))
+```
+
+```{r}
+jarque.bera.test(log(df2.black$turns))
+jarque.bera.test(log(df2.black$Rating_WB))
+```
+
+#### Equal Covariance
+
+```{r}
+ggplot(chess_df_q1, aes(x = turns, y = Rating_WB, col = winner)) + 
+    geom_point() + 
+    stat_ellipse() + 
+    scale_color_manual(values = c("black", "red"))
+```
+
+```{r}
+new_data = chess_df_q1 %>% dplyr::select(c(turns, Rating_WB))
+boxq1 = heplots::boxM(new_data, chess_df_q1$winner)
+boxq1
+```
+
+```{r}
+plot(boxq1)
+```
+
+### Model Train with k-fold Cross Validation
+
+```{r}
+fit_formula_lda = winner ~ rated + turns + pace_type + WOE_W1 + WOE_B1 + 
+  Rating_WB + opening_strategy + WOE_op_name
+
+lda_q1 = lda(fit_formula_lda, data=train_q1)
+lda_q1
+```
+
+```{r}
+set.seed(5)
+folds = createFolds(train_q1$winner, k=10)
+
+misclassification = function(index){
+  temp_train = train_q1[-index,]
+  temp_test = train_q1[index,]
+  temp_model = lda(fit_formula_lda, data = temp_train)
+  temp_predicts = predict(temp_model, temp_test, type = "class")$class
+  temp_actuals = temp_test$winner
+  return(1-mean(temp_predicts==temp_actuals))
+}
+
+misclas_rate = lapply(folds, misclassification)
+CV_Error_LDA = mean(as.numeric(misclas_rate))
+CV_Error_LDA
+```
+
+### Model Performance on Test Dataset
+
+```{r}
+lda_pred_class = predict(lda_q1, test_q1, type = "class")$class
+
+conf_mat_ldaq1 = confusionMatrix(data = lda_pred_class, 
+                                 reference = test_q1$winner)
+
+ggplot(as.data.frame(conf_mat_ldaq1$table), aes(x = Reference, y = Prediction)) +
+  geom_tile(aes(fill = Freq), colour = "white") +
+  scale_fill_gradient(low = "lightblue", high = "steelblue") +
+  geom_text(aes(label = Freq), color = "white", size = 6) +
+  xlab("True winners") +
+  ylab("Predicted winners") +
+  ggtitle("Confusion Matrix for LDA Model (Test Data)")
+```
+
+```{r}
+Accuracy_LDA_Q1 = sum(diag(conf_mat_ldaq1$table)) / sum(conf_mat_ldaq1$table)
+paste('The Accuracy value of LDA is:', Accuracy_LDA_Q1, sep = ' ')
+```
+
+#### Performance Metrics
+
+```{r}
+table = table(lda_pred_class, actual_q1)
+confusionMatrix(table, positive = 'WHITE')
+```
+
+#### ROC Curve and AUC Calculations
+
+```{r}
+pred_prob_lda = predict(lda_q1, test_q1, type='prob')
+pred_prob_lda = pred_prob_lda$posterior[,2]
+plot(performance(prediction(pred_prob_lda, actual_q1), "tpr", "fpr"),
+     main = 'ROC Curve of LDA',
+     col = 'darkred')
+abline(0, 1, lty = 2)
+plot(performance(prediction(pred_prob_lda, actual_q1), "acc"),
+     main = 'Accuracy vs. Classification Cutoff',
+     col = 'darkred')
+```
+
+```{r}
+auc_lda = performance(prediction(pred_prob_lda, actual_q1), "auc")
+paste('The AUC value of LDA is:', auc_lda@y.values[[1]], sep = ' ')
+```
+
+## Quadratic Discriminant Analysis
+
+### Additional Data Processing
+
+Not Required
+
+### Model Assumptions
+
+Tested on LDA part
+
+### Model Train with k-fold Cross Validation
+
+```{r}
+fit_formula_qda = winner ~ rated + turns + pace_type + WOE_W1 + WOE_B1 + 
+  Rating_WB + opening_strategy + WOE_op_name
+
+qda_q1 = qda(fit_formula_qda, data = train_q1)
+qda_q1
+```
+
+```{r}
+set.seed(5)
+folds = createFolds(train_q1$winner, k=10)
+
+misclassification = function(index){
+  temp_train = train_q1[-index,]
+  temp_test = train_q1[index,]
+  temp_model = qda(fit_formula_qda, data = temp_train)
+  temp_predicts = predict(temp_model, temp_test, type = "class")$class
+  temp_actuals = temp_test$winner
+  return(1-mean(temp_predicts==temp_actuals))
+}
+
+misclas_rate = lapply(folds, misclassification)
+CV_Error_QDA = mean(as.numeric(misclas_rate))
+CV_Error_QDA
+```
+
+### Model Performance on Test Dataset
+
+```{r}
+qda_pred_class = predict(qda_q1, test_q1, type = "class")$class
+
+conf_mat_qdaq1 = confusionMatrix(data = qda_pred_class, 
+                                 reference = test_q1$winner)
+
+ggplot(as.data.frame(conf_mat_qdaq1$table), aes(x = Reference, y = Prediction)) +
+  geom_tile(aes(fill = Freq), colour = "white") +
+  scale_fill_gradient(low = "lightblue", high = "steelblue") +
+  geom_text(aes(label = Freq), color = "white", size = 6) +
+  xlab("True winners") +
+  ylab("Predicted winners") +
+  ggtitle("Confusion Matrix for QDA Model (Test Data)")
+```
+
+```{r}
+Accuracy_QDA_Q1 = sum(diag(conf_mat_qdaq1$table)) / sum(conf_mat_qdaq1$table)
+paste('The Accuracy value of QDA is:', Accuracy_QDA_Q1, sep = ' ')
+```
+
+#### Performance Metrix
+
+```{r}
+table = table(qda_pred_class, actual_q1)
+confusionMatrix(table, positive = 'WHITE')
+```
+
+#### ROC Curve and AUC Calculations
+
+```{r}
+pred_prob_qda = predict(qda_q1, test_q1, type='prob')
+pred_prob_qda = pred_prob_qda$posterior[,2]
+plot(performance(prediction(pred_prob_qda, actual_q1), "tpr", "fpr"),
+     main = 'ROC Curve of QDA',
+     col = 'darkred')
+abline(0, 1, lty = 2)
+plot(performance(prediction(pred_prob_qda, actual_q1), "acc"),
+     main = 'Accuracy vs. Classification Cutoff',
+     col = 'darkred')
+```
+
+```{r}
+auc_qda = performance(prediction(pred_prob_qda, actual_q1), "auc")
+paste('The AUC value of QDA is:', auc_qda@y.values[[1]], sep = ' ')
+```
+
+## Question 1 Conclusion
+
+```{r}
+Model_Q1 = c('Recursive Partioning and Regression Tree',
+             'Logistic Regression',
+             'Linear Discriminant Analysis',
+             'Quadratic Discriminant Analysis')
+
+CV_Error_Q1 = c(CV_Tree_Q1, 
+                CV_Error_LogReg, 
+                CV_Error_LDA, 
+                CV_Error_QDA)
+
+AUC_Q1 = c(auc_tree@y.values[[1]], 
+           auc_log_reg@y.values[[1]], 
+           auc_lda@y.values[[1]], 
+           auc_qda@y.values[[1]])
+
+ACC_Q1 = c(Accuracy_Tree_Q1, 
+           Accuracy_LogReg_Q1, 
+           Accuracy_LDA_Q1,
+           Accuracy_QDA_Q1)
+
+Assumptions_Q1 = c('No Assumptions',
+                   'All Passed',
+                   'All Failed (Normality & Equal Cov.)',
+                   'All Failed (Normality)')
+
+Result_Q1 = data.frame(Models = Model_Q1,
+                       CV_Error = CV_Error_Q1,
+                       ACC = ACC_Q1,
+                       AUC = AUC_Q1,
+                       Assumptions = Assumptions_Q1)
+
+Result_Q1
+```
+
+```{r}
+# rm(list=ls()[! ls() %in% c('chess_df_q1', 'chess_df_q2', 'chess_df_q3', 
+#                            'train_q1', 'test_q1', 'train_q1_cleaned', 'IV')])
+```
+
+# Question 2
+
+## Stratified Train - Test Split
+
+```{r}
+set.seed(5)
+idx = createDataPartition(chess_df_q2$rating_bins, p = .75, list = FALSE)
+train_q2 <- chess_df_q2[ idx,]
+test_q2  <- chess_df_q2[-idx,]
+```
+
+## Decision Tree
+
+### Additional Data Processing
+
+Not Required
+
+### Model Assumptions
+
+No assumption to test
+
+### Model Train with k-fold Cross Validation
+
+#### Model Train
+
+```{r}
+fit_formula_tree = victory_status ~ rated + turns + pace_type + W1 + B1 +
+  Rating_WB + rating_bins + opening_strategy
+tree_Q2 = rpart(fit_formula_tree, 
+                data = train_q2, 
+                method="class")
+```
+
+```{r}
+rpart.plot(tree_Q2, 
+           type = 2, 
+           extra =1, 
+           under = TRUE, 
+           branch.lty=3, 
+           digits = 4)
+```
+
+#### Cross Validation Error
+
+```{r}
+set.seed(5)
+folds = createFolds(train_q2$victory_status, k=10)
+
+misclassification<-function(idx){
+  temp_train = train_q2[-idx,]
+  temp_test = train_q2[idx,]
+  tree_model = rpart(fit_formula_tree, data = temp_train, method="class")
+  pred = predict(tree_model,temp_test, type="class")
+  actual = temp_test$victory_status
+  conf = table(pred, actual)
+  1 - sum(diag(conf)) / sum(conf)
+}
+CV_Tree_Q2 = mean(as.numeric(lapply(folds, misclassification)))
+CV_Tree_Q2
+```
+
+### Model Performance on Test Dataset
+
+```{r}
+q2_tree_pred = predict(tree_Q2, test_q2, type = 'class')
+actual_q2 = test_q2$victory_status
+table = table(q2_tree_pred, actual_q2)
+ggplot(as.data.frame(table), aes(x = actual_q2, y = q2_tree_pred)) +
+  geom_tile(aes(fill = Freq), colour = "white") +
+  scale_fill_gradient(low = "lightblue", high = "steelblue") +
+  geom_text(aes(label = Freq), color = "white", size = 6) +
+  xlab("True Victory Status") +
+  ylab("Predicted Victory Status") +
+  ggtitle("Confusion Matrix for RPART Classification Tree (Test Data)")
+```
+
+```{r}
+Accuracy_Tree_Q2 = sum(diag(table)) / sum(table)
+paste('The Accuracy value of RPART Tree is:', Accuracy_Tree_Q2, sep = ' ')
+```
+
+#### Performance Metrics
+
+```{r}
+confusionMatrix(table)
+```
+
+## Multinomial Regression
+
+### Additional Data Processing
+
+Not Required
+
+### Model Assumptions
+
+#### Independence and Multicollinearity
+
+```{r warning=FALSE, message=FALSE}
+my_data = train_q2 %>% dplyr::select(c(turns, Rating_WB))
+ggpairs(my_data)
+```
+
+### Model Train with k-fold Cross Validation
+
+#### Model Train
+
+All Variables are significant
+
+```{r}
+fit_formula_mnom = victory_status ~ rated + turns + pace_type + 
+  Rating_WB + opening_strategy
+
+mnom_Q2 = vglm(fit_formula_mnom,
+               family=multinomial(),
+               data = train_q2)
+```
+
+```{r}
+summary(mnom_Q2)
+```
+
+#### Goodness of Fit Test
+
+p-value is less than 0.05.
+
+```{r}
+1-pchisq(sum(resid(mnom_Q2,
+                   type="pearson")^2),
+         df.residual(mnom_Q2))
+```
+
+#### Cross Validation
+
+```{r warning=FALSE, message=FALSE}
+set.seed(5)
+folds = createFolds(train_q2$victory_status, k=10)
+
+mcr.mnr = function(idx){
+  Train = train_q2[-idx,]
+  Test = train_q2[idx,]
+  fitmnr = vglm(fit_formula_mnom,
+                family=multinomial(),
+                data = Train)
+  pred_victor = predict(fitmnr, Test, type = "response")
+  predictmnr2 = colnames(pred_victor)[apply(pred_victor,1,which.max)]
+  return(mean(predictmnr2 != Test$victory_status))
+}
+
+CV_MNom_Q2 = mean(as.numeric(lapply(folds,mcr.mnr)))
+CV_MNom_Q2
+```
+
+### Model Performance on Test Dataset
+
+```{r}
+Pred_Prob_MNOM = predict(mnom_Q2, test_q2, type="response")
+Pred_Class_MNOM = colnames(Pred_Prob_MNOM)[apply(Pred_Prob_MNOM,1,which.max)]
+
+cf_multi = confusionMatrix(factor(Pred_Class_MNOM), test_q2$victory_status)
+cf_multi_df <- as.data.frame(cf_multi$table)
+
+ggplot(cf_multi_df, aes(x = Reference, y = Prediction)) +
+  geom_tile(aes(fill = Freq), colour = "white") +
+  scale_fill_gradient(low = "light blue",
+                      high = "steel blue",
+                      space = "Lab",
+                      na.value = "grey50",
+                      guide = "colourbar",
+                      aesthetics = "fill")+
+  geom_text(aes(label = Freq), 
+            color = "white", 
+            size = 6) +
+  ggtitle("Confusion Matrix for Multinomial Regression (Test Data)") + 
+  xlab("True Victory Status") +
+  ylab("Predicted Victory Status") +  
+  theme_minimal()
+```
+
+```{r}
+Accuracy_MNom_Q2 = sum(diag(cf_multi$table)) / sum(cf_multi$table)
+paste('The Accuracy value of MultiNomial Model is:', Accuracy_MNom_Q2, sep = ' ')
+```
+
+#### Performance Metrics
+
+```{r}
+cf_multi
+```
+
+## Linear Discriminant Analysis
+
+### Additional Data Processing
+
+Not Required.
+
+### Model Assumptions
+
+#### Normality with Actual Data
+
+```{r}
+Q2.outoftime = subset(chess_df_q2, victory_status == "OUTOFTIME")
+Q2.resign = subset(chess_df_q2,victory_status == "RESIGN")
+Q2.mate = subset(chess_df_q2,victory_status == "MATE")
+Q2.draw = subset(chess_df_q2,victory_status == "DRAW")
+```
+
+```{r}
+variable_2 = c("turns","Rating_WB")
+par(mfrow = c(2,1))
+
+for(i in variable_2) {
+  qqnorm(Q2.outoftime[[i]]);qqline(Q2.outoftime[[i]])}
+```
+
+```{r}
+par(mfrow = c(2,1))
+
+for(i in variable_2) {
+  qqnorm(Q2.mate[[i]]);qqline(Q2.mate[[i]])}
+```
+
+```{r}
+par(mfrow = c(2,1))
+
+for(i in variable_2) {
+  qqnorm(Q2.resign[[i]]);qqline(Q2.resign[[i]])}
+```
+
+```{r}
+par(mfrow = c(2,1))
+
+for(i in variable_2) {
+  qqnorm(Q2.draw[[i]]);qqline(Q2.draw[[i]])}
+```
+
+```{r}
+jarque.bera.test(Q2.outoftime$turns)
+jarque.bera.test(Q2.outoftime$Rating_WB)
+
+jarque.bera.test(Q2.mate$turns)
+jarque.bera.test(Q2.mate$Rating_WB)
+
+jarque.bera.test(Q2.resign$turns)
+jarque.bera.test(Q2.resign$Rating_WB)
+
+jarque.bera.test(Q2.draw$turns)
+jarque.bera.test(Q2.draw$Rating_WB)
+```
+
+#### Normality with Log Transform
+
+```{r}
+jarque.bera.test(log(Q2.outoftime$turns))
+jarque.bera.test(log(Q2.outoftime$Rating_WB))
+
+jarque.bera.test(log(Q2.mate$turns))
+jarque.bera.test(log(Q2.mate$Rating_WB))
+
+jarque.bera.test(log(Q2.resign$turns))
+jarque.bera.test(log(Q2.resign$Rating_WB))
+
+jarque.bera.test(log(Q2.draw$turns))
+jarque.bera.test(log(Q2.draw$Rating_WB))
+```
+
+#### Equal Covariance
+
+```{r}
+ggplot(chess_df_q2, aes(x = turns, y = Rating_WB, col = victory_status)) + 
+    geom_point() + 
+    stat_ellipse() + 
+    scale_color_manual(values = c("black", "red", "purple", "green"))
+```
+
+```{r}
+new_data = chess_df_q2 %>% dplyr::select(c(turns, Rating_WB))
+boxq2 = heplots::boxM(new_data, chess_df_q2$victory_status)
+boxq2
+```
+
+```{r}
+plot(boxq2)
+```
+
+### Model Train with k-fold Cross Validation
+
+```{r}
+fit_formula_lda = victory_status ~ rated + turns + pace_type + W1 + B1 + 
+  Rating_WB + opening_strategy
+
+lda_q2 = lda(fit_formula_lda, data=train_q2)
+lda_q2
+```
+
+```{r}
+set.seed(5)
+folds = createFolds(train_q2$victory_status, k=10)
+
+misclassification = function(index){
+  temp_train = train_q2[-index,]
+  temp_test = train_q2[index,]
+  temp_model = lda(fit_formula_lda, data = temp_train)
+  temp_predicts = predict(temp_model, temp_test, type = "class")$class
+  temp_actuals = temp_test$victory_status
+  return(1-mean(temp_predicts==temp_actuals))
+}
+
+misclas_rate = lapply(folds, misclassification)
+CV_LDA_Q2 = mean(as.numeric(misclas_rate))
+CV_LDA_Q2
+```
+
+### Model Performance on Test Dataset
+
+```{r}
+lda_pred_class = predict(lda_q2, test_q2, type = "class")$class
+
+conf_mat_ldaq2 = confusionMatrix(data = lda_pred_class, 
+                                 reference = test_q2$victory_status)
+
+ggplot(as.data.frame(conf_mat_ldaq2$table), aes(x = Reference, y = Prediction)) +
+  geom_tile(aes(fill = Freq), colour = "white") +
+  scale_fill_gradient(low = "lightblue", high = "steelblue") +
+  geom_text(aes(label = Freq), color = "white", size = 6) +
+  xlab("True winners") +
+  ylab("Predicted winners") +
+  ggtitle("Confusion Matrix for LDA Model (Test Data)")
+```
+
+```{r}
+Accuracy_LDA_Q2 = sum(diag(conf_mat_ldaq2$table)) / sum(conf_mat_ldaq2$table)
+paste('The Accuracy value of LDA is:', Accuracy_LDA_Q2, sep = ' ')
+```
+
+#### Performance Metrics
+
+```{r}
+table = table(lda_pred_class, actual_q2)
+confusionMatrix(table, positive = 'WHITE')
+```
+
+## Quadratic Discriminant Analysis
+
+### Additional Data Processing
+
+Not Required
+
+### Model Assumptions
+
+Tested on LDA part
+
+### Model Train with k-fold Cross Validation
+
+Error in qda.default(x, grouping, \...) : rank deficiency in group DRAW. W1 and B1 eliminated.
+
+```{r}
+fit_formula_qda = victory_status ~ rated + turns + pace_type + Rating_WB + opening_strategy
+
+qda_q2 = qda(fit_formula_qda, data = train_q2)
+qda_q2
+```
+
+```{r}
+set.seed(5)
+folds = createFolds(train_q2$victory_status, k=10)
+
+misclassification = function(index){
+  temp_train = train_q2[-index,]
+  temp_test = train_q2[index,]
+  temp_model = qda(fit_formula_qda, data = temp_train)
+  temp_predicts = predict(temp_model, temp_test, type = "class")$class
+  temp_actuals = temp_test$victory_status
+  return(1-mean(temp_predicts==temp_actuals))
+}
+
+misclas_rate = lapply(folds, misclassification)
+CV_Error_QDA = mean(as.numeric(misclas_rate))
+CV_Error_QDA
+```
+
+### Model Performance on Test Dataset
+
+```{r}
+qda_pred_class = predict(qda_q2, test_q2, type = "class")$class
+
+conf_mat_qdaq2 = confusionMatrix(data = qda_pred_class, 
+                                 reference = test_q2$victory_status)
+
+ggplot(as.data.frame(conf_mat_qdaq2$table), aes(x = Reference, y = Prediction)) +
+  geom_tile(aes(fill = Freq), colour = "white") +
+  scale_fill_gradient(low = "lightblue", high = "steelblue") +
+  geom_text(aes(label = Freq), color = "white", size = 6) +
+  xlab("True Victory Status") +
+  ylab("Predicted Victory Status") +
+  ggtitle("Confusion Matrix for QDA Model (Test Data)")
+```
+
+```{r}
+Accuracy_QDA_Q2 = sum(diag(conf_mat_qdaq2$table)) / sum(conf_mat_qdaq2$table)
+paste('The Accuracy value of QDA is:', Accuracy_QDA_Q2, sep = ' ')
+```
+
+#### Performance Metrics
+
+```{r}
+table = table(qda_pred_class, actual_q2)
+confusionMatrix(table)
+```
+
+## Question 2 Conclusion
+
+```{r}
+Model_Q2 = c('Recursive Partioning and Regression Tree',
+             'Multinomial Regression',
+             'Linear Discriminant Analysis',
+             'Quadratic Discriminant Analysis')
+
+CV_Error_Q2 = c(CV_Tree_Q2, 
+                CV_MNom_Q2, 
+                CV_LDA_Q2, 
+                CV_Error_QDA)
+
+ACC_Q2 = c(Accuracy_Tree_Q2, 
+           Accuracy_MNom_Q2, 
+           Accuracy_LDA_Q2,
+           Accuracy_QDA_Q2)
+
+Assumptions_Q2 = c('No Assumptions',
+                   'Passed But Goodness of Fit Failed',
+                   'All Failed (Normality & Equal Cov.)',
+                   'All Failed (Normality)')
+
+Result_Q2 = data.frame(Models = Model_Q2,
+                       CV_Error = CV_Error_Q2,
+                       ACC = ACC_Q2,
+                       Assumptions = Assumptions_Q2)
+
+Result_Q2
+```
+
+# Question 3
+
+## Stratified Train - Test Split
+
+```{r}
+idx = createDataPartition(chess_df_q3$W1, p = .75, list = FALSE)
+train_q3 <- chess_df_q3[ idx,]
+test_q3  <- chess_df_q3[-idx,]
+```
+
+## Logistic Regression
+
+### Additional Data Processing
+
+Not Required
+
+### Model Assumptions
+
+#### Linearity
+
+The predictor variable is not a natural numeric variable, it's calculated WOE values depending on the W1 variable. Therefore, linearity assumption is not checked since the predictor is a quasi categorical variable.
+
+#### Independence
+
+There is only one predictor in this model therefore there is no other variable to check its independence. Moreover, at the beginning of this file, we removed the duplicate records to eliminate multiple matches of same players. Therefore, observations are independent of each other.
+
+#### Outlier
+
+The predictor variable is not a natural numeric variable, it's calculated WOE values depending on the W1 variable. Therefore, outlier assumption is not checked since the predictor is a quasi categorical variable.
+
+#### Multicollinearity
+
+There is only one predictor in this model therefore there is no other variable to cause multicollinearity.
+
+### Model Train with k-fold Cross Validation
+
+#### Model Train
+
+```{r}
+fit_fomula_q3 = winner~WOE_W1
+log_reg_q3 = glm(fit_fomula_q3, data = train_q3, family = 'binomial')
+summary(log_reg_q3)
+```
+
+#### Cross Validation To Determine Best Cut-Off
+
+```{r}
+set.seed(5)
+folds_class = createFolds(train_q3$W1, k=10)
+
+CV_Error = rep(0,99)
+
+log_reg_treshold = seq(0.01, 0.99, 0.01)
+
+for (i in 1:99){
+  p_tresh = log_reg_treshold[i]
+  err = rep(0,10)
+  for (j in 1:10){
+    assign(paste0('temp_train'), train_q3[-eval(parse(text = paste0('folds_class$Fold0',1))),])
+    assign(paste0('temp_validation'), train_q3[eval(parse(text = paste0('folds_class$Fold0',1))),])
+    temp_log_reg = glm(fit_fomula_q3, data = temp_train, family = 'binomial')
+    temp_probs = predict(temp_log_reg, temp_validation, type="response")
+    actual = temp_validation$winner
+    predicted = rep('BLACK', nrow(temp_validation))
+    predicted[temp_probs >= p_tresh] = 'WHITE'
+    err[j] = 1-mean(predicted==actual)
+  }
+  CV_Error[i] = mean(err)
+}
+
+CV_Result = data.frame(Probabiliy_Tresholds = log_reg_treshold, CV_Error)
+
+ggplot()+
+  geom_line(data = CV_Result, aes(Probabiliy_Tresholds, CV_Error), colour='darkred')
+
+CV_Result %>% filter(CV_Error == min(CV_Error))
+```
+
+#### Assigning Probabilities to Actual W1
+
+```{r}
+final_df = data.frame(WOE_W1 = IV$Tables$W1$WOE, W1 = IV$Tables$W1$W1)
+final_df$Prob_Win = predict(log_reg_q3, final_df, type="response")
+```
+
+#### The Best W1 Maximizing A Win for White
+
+```{r}
+final_df[order(-final_df$Prob_Win),]
+```
